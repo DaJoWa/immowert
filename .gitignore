@@ -1,0 +1,29 @@
+# Abhängigkeiten
+node_modules/
+
+# Build-Ausgabe
+dist/
+
+# Umgebungsvariablen (API-Schlüssel niemals einchecken)
+.env
+.env.*
+!.env.example
+
+# Hosting-Werkzeuge
+.vercel/
+.wrangler/
+.netlify/
+
+# Logs und Systemdateien
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+.DS_Store
+Thumbs.db
+
+# Editoren
+.vscode/*
+!.vscode/extensions.json
+.idea/
