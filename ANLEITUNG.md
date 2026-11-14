@@ -330,3 +330,17 @@ wenn Sie diesen Schritt gehen möchten.
   Umgebungsvariable hin (Abschnitt 4, Schritt 6).
 - **Eigene Domain zeigt Zertifikatsfehler:** DNS-Änderungen können bis zu 24
   Stunden dauern; SSL-Zertifikate werden danach automatisch ausgestellt.
+
+---
+
+## Nachtrag: Cloudflare Workers (Workers Builds)
+
+Ist das Repository mit einem Cloudflare **Worker** (nicht Pages) verbunden,
+liest Cloudflare die Datei `wrangler.jsonc`. Sie baut die App mit
+`npm run build` und liefert `dist/` zusammen mit dem Proxy unter
+`/api/claude` aus (Einstiegspunkt `worker/index.js`, der die Logik aus
+`functions/api/claude.js` nutzt).
+
+Den API-Schlüssel hinterlegen Sie im Cloudflare-Dashboard unter
+Workers & Pages → immowert → Settings → Variables and Secrets als Secret
+`ANTHROPIC_API_KEY`.
