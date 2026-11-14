@@ -80,3 +80,22 @@ test("Rate-Limit greift nach RATE_LIMIT_MAX Anfragen und setzt sich zurück", ()
   checkRateLimit("9.9.9.9", { RATE_LIMIT_MAX: "1" }, t0);
   assert.equal(status(() => checkRateLimit("9.9.9.9", { RATE_LIMIT_MAX: "1" }, t0)), 429);
 });
+
+test("Fortsetzung nach pause_turn mit Websuche-Blöcken geht durch", () => {
+  const tools = [{ type: "web_search_20250305", name: "web_search" }];
+  const assistant = {
+    role: "assistant",
+    content: [
+      { type: "text", text: "Ich suche…", citations: null },
+      { type: "server_tool_use", id: "srvtoolu_1", name: "web_search", input: { query: "Bodenrichtwert" } },
+      { type: "web_search_tool_result", tool_use_id: "srvtoolu_1", content: [] },
+    ],
+  };
+  const messages = [ok().messages[0], assistant];
+  const clean = sanitizeRequest(ok({ tools, messages }));
+  assert.equal(clean.messages[1].content[1].type, "server_tool_use");
+  // ohne Websuche oder in einer user-Nachricht nicht erlaubt
+  assert.equal(status(() => sanitizeRequest(ok({ messages }))), 400);
+  const fake = { role: "user", content: [assistant.content[1]] };
+  assert.equal(status(() => sanitizeRequest(ok({ tools, messages: [fake] }))), 400);
+});

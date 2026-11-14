@@ -25,8 +25,9 @@ export const MAX_TOKENS_LIMIT = 4096;
 export const DEFAULT_MAX_TOKENS = 1000;
 
 // --- 4. Rate-Limit (je IP-Adresse) ---------------------------------------
-// Ein komplettes Gutachten braucht bis zu 6 KI-Aufrufe. 30 Aufrufe pro Stunde
-// erlauben also rund 5 Gutachten je Besucher und Stunde.
+// Ein komplettes Gutachten braucht 6 KI-Aufrufe, mit fortgesetzter Websuche
+// bis zu 9. 30 Aufrufe pro Stunde
+// erlauben also rund 3–5 Gutachten je Besucher und Stunde.
 // Beide Werte lassen sich per Umgebungsvariable überschreiben
 // (RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SECONDS).
 export const RATE_LIMIT_MAX = 30;
@@ -43,6 +44,7 @@ export const MAX_WEB_SEARCH_USES = 5;
 
 const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif"];
 const WEB_SEARCH_TOOL_TYPE = "web_search_20250305";
+const ASSISTANT_SEARCH_BLOCKS = ["server_tool_use", "web_search_tool_result"];
 
 // -------------------------------------------------------------------------
 // Hilfsfunktionen
@@ -186,7 +188,7 @@ export function sanitizeRequest(body) {
     throw new GuardError(400, `Es sind 1 bis ${MAX_MESSAGES} Nachrichten erlaubt.`);
   }
 
-  const counters = { images: 0, documents: 0, textChars: 0 };
+  const counters = { images: 0, documents: 0, textChars: 0, searchBlocks: 0 };
   const cleanMessages = messages.map((m) => sanitizeMessage(m, counters));
 
   if (counters.images > MAX_IMAGES) {
@@ -223,6 +225,10 @@ export function sanitizeRequest(body) {
     }
   }
 
+  if (counters.searchBlocks > 0 && !clean.tools) {
+    throw new GuardError(400, "Websuche-Ergebnisse sind nur mit aktivierter Websuche erlaubt.");
+  }
+
   return clean;
 }
 
@@ -248,6 +254,15 @@ function sanitizeMessage(m, counters) {
     if (block.type === "text" && typeof block.text === "string") {
       counters.textChars += block.text.length;
       return { type: "text", text: block.text };
+    }
+
+    // Fortsetzung einer pausierten Websuche (stop_reason "pause_turn"): Die App
+    // schickt die bisherige Antwort von Claude als "assistant"-Nachricht zurück.
+    // Darin stehen die Websuche-Blöcke, die unverändert zurück müssen.
+    // Begrenzt werden sie über MAX_BODY_BYTES, MAX_MESSAGES und die Websuche-Grenze.
+    if (m.role === "assistant" && ASSISTANT_SEARCH_BLOCKS.includes(block.type)) {
+      counters.searchBlocks += 1;
+      return block;
     }
 
     // Bilder und PDFs nur als Base64-Daten, keine externen URLs

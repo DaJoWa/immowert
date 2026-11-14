@@ -315,7 +315,7 @@ den Cloudflare Worker (`worker/index.js`).
 | Erlaubte Modelle | `claude-sonnet-4-6`, `claude-haiku-4-5` | Ablehnung (400) |
 | Antwortlänge `max_tokens` | höchstens 4096 (Standard 1000) | Wert wird auf 4096 gekürzt |
 | Herkunft | nur die eigene Adresse sowie Adressen aus `ALLOWED_ORIGINS` | Ablehnung (403) |
-| Rate-Limit | 30 Anfragen je IP-Adresse und Stunde (≈ 5 Gutachten) | Ablehnung (429) mit Wartezeit |
+| Rate-Limit | 30 Anfragen je IP-Adresse und Stunde (≈ 3–5 Gutachten, je nach Websuche) | Ablehnung (429) mit Wartezeit |
 | Größe der Anfrage | höchstens 8 MB, 25 Bilder, 10 PDFs, 4 Nachrichten | Ablehnung (400/413) |
 | Tools | nur die Websuche, höchstens 5 Suchen je Anfrage | andere Tools: Ablehnung (400) |
 | Sonstige Felder | nur Modell, `max_tokens`, System-Prompt, Nachrichten, `temperature`, Websuche | werden still entfernt |
