@@ -15,7 +15,9 @@ Ein vollständiges, lauffähiges Webprojekt:
   KI-Pipeline + Gutachten-Ansicht)
 - `src/main.jsx`, `src/index.css`, `index.html` – Standard-Grundgerüst (Vite + React)
 - `api/claude.js` – ein kleiner Server-Baustein, der die Anfragen an die
-  Claude-API von Anthropic weiterleitet (für Vercel)
+  Claude-API von Anthropic prüft und weiterleitet (für Vercel)
+- `server/claudeGuard.js` – die Schutzregeln dieses Bausteins (erlaubte
+  Modelle, Obergrenzen, Herkunft, Rate-Limit), siehe Abschnitt 11a
 - `functions/api/claude.js` – dieselbe Funktion, nur für Cloudflare Pages
   (falls Sie das statt Vercel nutzen möchten)
 - `package.json`, `vite.config.js`, `tailwind.config.js`, `postcss.config.js` – Konfigurationsdateien
@@ -287,11 +289,10 @@ ausführen.
   `ANTHROPIC_API_KEY` auf dem Server – er darf niemals in `src/App.jsx` oder
   einer anderen Frontend-Datei eingetragen werden.
 - Der Endpunkt `/api/claude` ist öffentlich erreichbar (jeder, der Ihre
-  Seite besucht, kann ihn technisch ansprechen). Das in Schritt 3 gesetzte
-  Ausgabenlimit bei Anthropic ist daher die wichtigste Absicherung gegen
-  Missbrauch. Für höhere Besucherzahlen empfiehlt sich zusätzlich ein
-  einfaches Rate-Limiting (z.B. über Vercel/Cloudflare-eigene
-  Sicherheitsfunktionen oder einen Zähler pro IP-Adresse in `api/claude.js`).
+  Seite besucht, kann ihn technisch ansprechen). Der Server-Baustein prüft
+  deshalb jede Anfrage, bevor sie an Anthropic geht (Details im nächsten
+  Abschnitt 11a). Das in Schritt 3 gesetzte Ausgabenlimit bei Anthropic
+  bleibt trotzdem die wichtigste Absicherung gegen Kostenüberraschungen.
 - **Datenschutz/DSGVO:** Formulardaten sowie hochgeladene Fotos und
   Dokumente werden zur Auswertung an die Anthropic-API übermittelt. Für den
   Einsatz mit echten Kundendaten sollten Sie Ihre Datenschutzerklärung
@@ -299,6 +300,64 @@ ausführen.
   Anthropic prüfen (Unterlagen dazu finden Sie im Anthropic Trust Center
   bzw. in der Console unter "Privacy"). Diese Anleitung stellt keine
   Rechtsberatung dar.
+
+---
+
+## 11a. Grenzen des Server-Bausteins `/api/claude`
+
+Der Baustein reicht Anfragen nicht mehr ungeprüft weiter. Alle Regeln stehen
+an einer Stelle in `server/claudeGuard.js` und gelten gleichermaßen für
+Vercel (`api/claude.js`), Cloudflare Pages (`functions/api/claude.js`) und
+den Cloudflare Worker (`worker/index.js`).
+
+| Regel | Grenze | Was passiert bei Verstoß |
+|---|---|---|
+| Erlaubte Modelle | `claude-sonnet-4-6`, `claude-haiku-4-5` | Ablehnung (400) |
+| Antwortlänge `max_tokens` | höchstens 4096 (Standard 1000) | Wert wird auf 4096 gekürzt |
+| Herkunft | nur die eigene Adresse sowie Adressen aus `ALLOWED_ORIGINS` | Ablehnung (403) |
+| Rate-Limit | 30 Anfragen je IP-Adresse und Stunde (≈ 5 Gutachten) | Ablehnung (429) mit Wartezeit |
+| Größe der Anfrage | höchstens 8 MB, 25 Bilder, 10 PDFs, 4 Nachrichten | Ablehnung (400/413) |
+| Tools | nur die Websuche, höchstens 5 Suchen je Anfrage | andere Tools: Ablehnung (400) |
+| Sonstige Felder | nur Modell, `max_tokens`, System-Prompt, Nachrichten, `temperature`, Websuche | werden still entfernt |
+
+**Optionale Umgebungsvariablen** (wie `ANTHROPIC_API_KEY` in den
+Projekteinstellungen hinterlegen):
+
+- `ALLOWED_ORIGINS` – weitere erlaubte Adressen, kommagetrennt, z.B.
+  `https://www.ihre-domain.de`. Nötig, wenn die App per iframe auf einer
+  anderen Domain eingebettet ist (Abschnitt 6, Option B). Läuft die App
+  direkt unter ihrer eigenen Adresse, brauchen Sie nichts einzutragen.
+- `RATE_LIMIT_MAX` und `RATE_LIMIT_WINDOW_SECONDS` – ändern das Rate-Limit,
+  z.B. `60` und `3600` für 60 Anfragen pro Stunde.
+
+Ein anderes Modell oder eine andere Obergrenze stellen Sie in
+`server/claudeGuard.js` ganz oben ein (`ALLOWED_MODELS`, `MAX_TOKENS_LIMIT`).
+Wenn Sie in `src/App.jsx` ein neues Modell eintragen, muss es auch dort in
+der Liste stehen, sonst lehnt der Server es ab.
+
+**Was diese Regeln nicht leisten – bitte beachten:**
+
+- **Die Herkunftsprüfung hält nur fremde Webseiten ab.** Ein Skript oder
+  Programm kann den `Origin`-Header fälschen. Gegen gezielten Missbrauch
+  helfen Rate-Limit und Ausgabenlimit, nicht die Herkunftsprüfung.
+- **Das eingebaute Rate-Limit ist nur eine Bremse.** Der Zähler liegt im
+  Arbeitsspeicher der laufenden Funktion. Vercel und Cloudflare starten bei
+  viel Verkehr mehrere Instanzen und beenden sie nach einer Weile; jede
+  zählt für sich, und nach einem Neustart beginnt der Zähler von vorn. Für
+  eine verlässliche Grenze richten Sie zusätzlich eine Regel beim
+  Hosting-Anbieter ein:
+  - **Cloudflare:** Dashboard → Ihre Domain → Security → WAF →
+    *Rate limiting rules*, Regel für den Pfad `/api/claude` (eine Regel ist
+    im kostenlosen Tarif enthalten; setzt eine eigene Domain bei
+    Cloudflare voraus).
+  - **Vercel:** Projekt → Firewall → *Rate Limiting* bzw. eine eigene Regel
+    für `/api/claude` (Umfang je nach Tarif).
+- **Der System-Prompt wird nicht geprüft.** Wer die Schnittstelle direkt
+  anspricht, kann innerhalb der obigen Grenzen eigene Texte an Claude
+  schicken. Die Grenzen sorgen dafür, dass das nur langsam und mit kleinem
+  Modell-/Token-Budget möglich ist.
+- **Ausgabenlimit nicht vergessen.** Setzen Sie in der Anthropic Console ein
+  monatliches Limit (Schritt 1). Es ist die einzige harte Kostengrenze.
 
 ---
 
