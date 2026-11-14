@@ -13,6 +13,7 @@ import {
   Check,
   Loader2,
   AlertCircle,
+  AlertTriangle,
   X,
   FileText,
   Printer,
@@ -603,19 +604,24 @@ function fileToBase64(file) {
   });
 }
 
-// Aufruf der Claude-API über unseren eigenen Server-Proxy (siehe /api/claude.js).
-// So bleibt der Anthropic-API-Key sicher auf dem Server und taucht nie im Browser auf.
-async function callClaude({ system, content, useWebSearch = false }) {
-  const body = {
-    model: "claude-sonnet-4-6",
-    max_tokens: 1000,
-    system,
-    messages: [{ role: "user", content }],
-  };
-  if (useWebSearch) {
-    body.tools = [{ type: "web_search_20250305", name: "web_search" }];
-  }
+// Obergrenze der Antwortlänge (Ausgabe-Tokens) je Pipeline-Schritt.
+// Deutsche Texte brauchen grob 2 Tokens pro Wort. Die Grenzen liegen deutlich
+// über den Wortvorgaben der System-Prompts, damit Antworten nicht mitten im
+// Satz abbrechen. Die Wertermittlung braucht zusätzlich Platz für die Websuche.
+const MAX_TOKENS = {
+  photos: 1500,
+  documents: 1500,
+  lage: 2000,
+  bau: 2000,
+  wert: 4000,
+  fazit: 2000,
+};
 
+// Wie oft eine wegen langer Websuche pausierte Antwort (stop_reason "pause_turn")
+// höchstens fortgesetzt wird.
+const MAX_PAUSE_CONTINUATIONS = 3;
+
+async function postToClaude(body) {
   const res = await fetch("/api/claude", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -633,17 +639,59 @@ async function callClaude({ system, content, useWebSearch = false }) {
     throw new Error(`API-Fehler (${res.status})${detail ? `: ${detail}` : ""}`);
   }
 
-  const data = await res.json();
-  const text = (data.content || [])
+  return res.json();
+}
+
+// Aufruf der Claude-API über unseren eigenen Server-Proxy (siehe /api/claude.js).
+// So bleibt der Anthropic-API-Key sicher auf dem Server und taucht nie im Browser auf.
+//
+// Rückgabe: { text, truncated }. truncated ist true, wenn die Antwort wegen der
+// Längengrenze (stop_reason "max_tokens") abgebrochen wurde oder nach mehreren
+// Fortsetzungen immer noch pausiert war – der Text ist dann unvollständig.
+async function callClaude({ system, content, useWebSearch = false, maxTokens = 2000 }) {
+  const userMessage = { role: "user", content };
+  let assistantContent = [];
+  let stopReason = null;
+
+  for (let attempt = 0; attempt <= MAX_PAUSE_CONTINUATIONS; attempt++) {
+    const body = {
+      model: "claude-sonnet-4-6",
+      max_tokens: maxTokens,
+      system,
+      messages:
+        assistantContent.length > 0
+          ? [userMessage, { role: "assistant", content: assistantContent }]
+          : [userMessage],
+    };
+    if (useWebSearch) {
+      body.tools = [{ type: "web_search_20250305", name: "web_search" }];
+    }
+
+    const data = await postToClaude(body);
+    assistantContent = [...assistantContent, ...(data.content || [])];
+    stopReason = data.stop_reason;
+
+    // Bei "pause_turn" hat der Server die Websuche unterbrochen. Die bisherige
+    // Antwort wird unverändert zurückgeschickt, dann setzt das Modell fort.
+    if (stopReason !== "pause_turn") break;
+  }
+
+  const text = assistantContent
     .filter((b) => b.type === "text" && typeof b.text === "string")
     .map((b) => b.text)
     .join("\n")
     .trim();
 
+  const truncated = stopReason === "max_tokens" || stopReason === "pause_turn";
+
   if (!text) {
-    throw new Error("Leere Antwort vom Modell erhalten.");
+    throw new Error(
+      truncated
+        ? "Die Antwort hat die Längengrenze erreicht, bevor Text erzeugt wurde."
+        : "Leere Antwort vom Modell erhalten."
+    );
   }
-  return text;
+  return { text, truncated };
 }
 
 /* =========================================================================
@@ -1018,6 +1066,7 @@ function PipelineProgress({ status }) {
               "flex items-start gap-4 rounded-xl border px-4 py-3 transition",
               st === "running" && "border-amber-500 bg-neutral-800",
               st === "done" && "border-neutral-700 bg-neutral-900",
+              st === "truncated" && "border-amber-700 bg-neutral-900",
               st === "error" && "border-red-800 bg-neutral-900",
               st === "skipped" && "border-neutral-800 bg-neutral-950 opacity-50",
               st === "idle" && "border-neutral-800 bg-neutral-950"
@@ -1025,6 +1074,7 @@ function PipelineProgress({ status }) {
           >
             <div className="mt-0.5 flex-shrink-0">
               {st === "done" && <Check className="h-5 w-5 text-amber-500" />}
+              {st === "truncated" && <AlertTriangle className="h-5 w-5 text-amber-400" />}
               {st === "running" && <Loader2 className="h-5 w-5 animate-spin text-amber-500" />}
               {st === "error" && <AlertCircle className="h-5 w-5 text-red-500" />}
               {(st === "idle" || st === "skipped") && (
@@ -1040,6 +1090,11 @@ function PipelineProgress({ status }) {
               <p className="mt-0.5 text-xs text-neutral-500">
                 {st === "skipped" ? "Übersprungen (keine passenden Daten vorhanden)" : step.description}
               </p>
+              {st === "truncated" && (
+                <p className="mt-1 text-xs text-amber-400">
+                  Die Antwort hat die Längengrenze erreicht und wurde abgeschnitten – dieser Abschnitt ist unvollständig.
+                </p>
+              )}
               {st === "error" && (
                 <p className="mt-1 text-xs text-red-400">
                   Fehler bei diesem Schritt – das Gutachten wird ohne diesen Abschnitt fortgesetzt.
@@ -1136,9 +1191,26 @@ function SubNote({ title, text }) {
   );
 }
 
+const TRUNCATION_NOTE =
+  "Hinweis: Dieser Abschnitt wurde wegen der Längengrenze der KI-Antwort abgeschnitten und ist unvollständig. Bitte erstellen Sie die Markteinschätzung bei Bedarf erneut.";
+
+function TruncationNote({ show }) {
+  if (!show) return null;
+  return (
+    <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+      <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-600" />
+      <p>{TRUNCATION_NOTE}</p>
+    </div>
+  );
+}
+
 function buildPlainTextReport(report) {
   const { id, date, sections, formSnapshot } = report;
+  const truncated = report.truncated || {};
   const lines = [];
+  const note = (key) => {
+    if (truncated[key]) lines.push(`[${TRUNCATION_NOTE}]`);
+  };
   lines.push("IMMOWERT – MARKTWERTEINSCHÄTZUNG");
   lines.push(addressLine(formSnapshot));
   lines.push(`Gutachten-ID: ${id}`);
@@ -1154,31 +1226,37 @@ function buildPlainTextReport(report) {
   lines.push("2. LAGE UND RECHTLICHE RAHMENBEDINGUNGEN");
   lines.push("");
   lines.push(sections.lage || "");
+  note("lage");
 
   lines.push("");
   lines.push("3. BAUSUBSTANZ, AUSSTATTUNG UND ZUSTAND");
   lines.push("");
   lines.push(sections.bau || "");
+  note("bau");
   if (sections.photos) {
     lines.push("");
     lines.push("Fotoauswertung:");
     lines.push(sections.photos);
+    note("photos");
   }
   if (sections.documents) {
     lines.push("");
     lines.push("Dokumentenauswertung:");
     lines.push(sections.documents);
+    note("documents");
   }
 
   lines.push("");
   lines.push("4. WERTERMITTLUNG");
   lines.push("");
   lines.push(sections.wert || "");
+  note("wert");
 
   lines.push("");
   lines.push("5. ZUSAMMENFASSUNG UND EMPFEHLUNG");
   lines.push("");
   lines.push(sections.fazit || "");
+  note("fazit");
 
   lines.push("");
   lines.push("6. HAFTUNGSAUSSCHLUSS");
@@ -1190,6 +1268,7 @@ function buildPlainTextReport(report) {
 
 function ReportView({ report, onReset }) {
   const { id, date, sections, formSnapshot } = report;
+  const truncated = report.truncated || {};
 
   const handleDownload = () => {
     const text = buildPlainTextReport(report);
@@ -1234,20 +1313,26 @@ function ReportView({ report, onReset }) {
 
         <Section number={2} title="Lage und rechtliche Rahmenbedingungen">
           <Prose text={sections.lage} />
+          <TruncationNote show={truncated.lage} />
         </Section>
 
         <Section number={3} title="Bausubstanz, Ausstattung und Zustand">
           <Prose text={sections.bau} />
+          <TruncationNote show={truncated.bau} />
           <SubNote title="Fotoauswertung" text={sections.photos} />
+          <TruncationNote show={sections.photos && truncated.photos} />
           <SubNote title="Dokumentenauswertung" text={sections.documents} />
+          <TruncationNote show={sections.documents && truncated.documents} />
         </Section>
 
         <Section number={4} title="Wertermittlung">
           <Prose text={sections.wert} />
+          <TruncationNote show={truncated.wert} />
         </Section>
 
         <Section number={5} title="Zusammenfassung und Empfehlung">
           <Prose text={sections.fazit} />
+          <TruncationNote show={truncated.fazit} />
         </Section>
 
         <Section number={6} title="Haftungsausschluss">
@@ -1712,6 +1797,7 @@ export default function App() {
     });
 
     const newSections = { photos: "", documents: "", lage: "", bau: "", wert: "", fazit: "" };
+    const newTruncated = { photos: false, documents: false, lage: false, bau: false, wert: false, fazit: false };
 
     // 1) Fotoanalyse
     if (photos.length > 0) {
@@ -1729,10 +1815,11 @@ export default function App() {
           content.push({ type: "text", text: `Kategorie: ${cat ? cat.label : "Sonstiges"}` });
           content.push({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: p.base64 } });
         });
-        const text = await callClaude({ system: PHOTO_SYSTEM_PROMPT, content });
+        const { text, truncated } = await callClaude({ system: PHOTO_SYSTEM_PROMPT, content, maxTokens: MAX_TOKENS.photos });
         newSections.photos = text;
         setSections((s) => ({ ...s, photos: text }));
-        setPipelineStatus((s) => ({ ...s, photos: "done" }));
+        newTruncated.photos = truncated;
+        setPipelineStatus((s) => ({ ...s, photos: truncated ? "truncated" : "done" }));
       } catch (err) {
         setPipelineStatus((s) => ({ ...s, photos: "error" }));
       }
@@ -1754,10 +1841,11 @@ export default function App() {
           content.push({ type: "text", text: `Kategorie: ${cat ? cat.label : "Sonstiges"}` });
           content.push({ type: "document", source: { type: "base64", media_type: "application/pdf", data: d.base64 } });
         });
-        const text = await callClaude({ system: DOC_SYSTEM_PROMPT, content });
+        const { text, truncated } = await callClaude({ system: DOC_SYSTEM_PROMPT, content, maxTokens: MAX_TOKENS.documents });
         newSections.documents = text;
         setSections((s) => ({ ...s, documents: text }));
-        setPipelineStatus((s) => ({ ...s, documents: "done" }));
+        newTruncated.documents = truncated;
+        setPipelineStatus((s) => ({ ...s, documents: truncated ? "truncated" : "done" }));
       } catch (err) {
         setPipelineStatus((s) => ({ ...s, documents: "error" }));
       }
@@ -1767,10 +1855,11 @@ export default function App() {
     setPipelineStatus((s) => ({ ...s, lage: "running" }));
     try {
       const prompt = `Adresse: ${addressLine(formData)}\n\n${fieldSummary(formData, LAGE_KEYS)}`;
-      const text = await callClaude({ system: LAGE_SYSTEM_PROMPT, content: prompt });
+      const { text, truncated } = await callClaude({ system: LAGE_SYSTEM_PROMPT, content: prompt, maxTokens: MAX_TOKENS.lage });
       newSections.lage = text;
       setSections((s) => ({ ...s, lage: text }));
-      setPipelineStatus((s) => ({ ...s, lage: "done" }));
+      newTruncated.lage = truncated;
+      setPipelineStatus((s) => ({ ...s, lage: truncated ? "truncated" : "done" }));
     } catch (err) {
       setPipelineStatus((s) => ({ ...s, lage: "error" }));
     }
@@ -1781,10 +1870,11 @@ export default function App() {
       let prompt = fieldSummary(formData, BAU_KEYS);
       if (newSections.photos) prompt += `\n\nErgebnis der Fotoauswertung:\n${newSections.photos}`;
       if (newSections.documents) prompt += `\n\nErgebnis der Dokumentenauswertung:\n${newSections.documents}`;
-      const text = await callClaude({ system: BAU_SYSTEM_PROMPT, content: prompt });
+      const { text, truncated } = await callClaude({ system: BAU_SYSTEM_PROMPT, content: prompt, maxTokens: MAX_TOKENS.bau });
       newSections.bau = text;
       setSections((s) => ({ ...s, bau: text }));
-      setPipelineStatus((s) => ({ ...s, bau: "done" }));
+      newTruncated.bau = truncated;
+      setPipelineStatus((s) => ({ ...s, bau: truncated ? "truncated" : "done" }));
     } catch (err) {
       setPipelineStatus((s) => ({ ...s, bau: "error" }));
     }
@@ -1794,10 +1884,16 @@ export default function App() {
     try {
       let prompt = `Adresse: ${addressLine(formData)}\n\n${fieldSummary(formData, WERT_KEYS)}`;
       if (newSections.documents) prompt += `\n\nErgebnis der Dokumentenauswertung:\n${newSections.documents}`;
-      const text = await callClaude({ system: WERT_SYSTEM_PROMPT, content: prompt, useWebSearch: true });
+      const { text, truncated } = await callClaude({
+        system: WERT_SYSTEM_PROMPT,
+        content: prompt,
+        useWebSearch: true,
+        maxTokens: MAX_TOKENS.wert,
+      });
       newSections.wert = text;
       setSections((s) => ({ ...s, wert: text }));
-      setPipelineStatus((s) => ({ ...s, wert: "done" }));
+      newTruncated.wert = truncated;
+      setPipelineStatus((s) => ({ ...s, wert: truncated ? "truncated" : "done" }));
     } catch (err) {
       setPipelineStatus((s) => ({ ...s, wert: "error" }));
     }
@@ -1806,15 +1902,17 @@ export default function App() {
     setPipelineStatus((s) => ({ ...s, fazit: "running" }));
     try {
       const parts = [];
-      if (newSections.lage) parts.push(`Lage und rechtliche Rahmenbedingungen:\n${newSections.lage}`);
-      if (newSections.bau) parts.push(`Bausubstanz, Technik und Ausstattung:\n${newSections.bau}`);
-      if (newSections.wert) parts.push(`Wertermittlung:\n${newSections.wert}`);
+      const cut = (key) => (newTruncated[key] ? "\n(Hinweis: Dieser Abschnitt wurde abgeschnitten und ist unvollständig.)" : "");
+      if (newSections.lage) parts.push(`Lage und rechtliche Rahmenbedingungen:\n${newSections.lage}${cut("lage")}`);
+      if (newSections.bau) parts.push(`Bausubstanz, Technik und Ausstattung:\n${newSections.bau}${cut("bau")}`);
+      if (newSections.wert) parts.push(`Wertermittlung:\n${newSections.wert}${cut("wert")}`);
       parts.push(`Ziel des Nutzers: ${formData.nutzerziel || "nicht angegeben"}`);
       if (formData.angebotspreis) parts.push(`Angebots- bzw. Wunschpreis: ${formatEUR(formData.angebotspreis)}`);
-      const text = await callClaude({ system: FAZIT_SYSTEM_PROMPT, content: parts.join("\n\n") });
+      const { text, truncated } = await callClaude({ system: FAZIT_SYSTEM_PROMPT, content: parts.join("\n\n"), maxTokens: MAX_TOKENS.fazit });
       newSections.fazit = text;
       setSections((s) => ({ ...s, fazit: text }));
-      setPipelineStatus((s) => ({ ...s, fazit: "done" }));
+      newTruncated.fazit = truncated;
+      setPipelineStatus((s) => ({ ...s, fazit: truncated ? "truncated" : "done" }));
     } catch (err) {
       setPipelineStatus((s) => ({ ...s, fazit: "error" }));
     }
@@ -1832,6 +1930,7 @@ export default function App() {
       id: genGutachtenId(),
       date: todayDE(),
       sections: newSections,
+      truncated: newTruncated,
       formSnapshot: { ...formData },
     });
   }, [formData, photos, documents]);
